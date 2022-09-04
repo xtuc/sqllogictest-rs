@@ -12,6 +12,7 @@ use itertools::Itertools;
 use tempfile::{tempdir, TempDir};
 
 use crate::parser::*;
+use crate::{Query, Statement};
 
 /// The async database to be tested.
 #[async_trait]
@@ -19,8 +20,11 @@ pub trait AsyncDB: Send {
     /// The error type of SQL execution.
     type Error: std::error::Error + Send + Sync + 'static;
 
-    /// Async run a SQL query and return the output.
-    async fn run(&mut self, sql: &str) -> Result<String, Self::Error>;
+    /// Async run a SQL statment and return the output.
+    async fn run_statement(&mut self, stmt: &Statement) -> Result<String, Self::Error>;
+
+    /// Async run a SQL Query and return the output.
+    async fn run_query(&mut self, query: &Query) -> Result<String, Self::Error>;
 
     /// Engine name of current database.
     fn engine_name(&self) -> &str {
@@ -42,8 +46,11 @@ pub trait DB: Send {
     /// The error type of SQL execution.
     type Error: std::error::Error + Send + Sync + 'static;
 
-    /// Run a SQL query and return the output.
-    fn run(&mut self, sql: &str) -> Result<String, Self::Error>;
+    /// Run a SQL statment and return the output.
+    fn run_statement(&mut self, stmt: &Statement) -> Result<String, Self::Error>;
+
+    /// Run a SQL Query and return the output.
+    fn run_query(&mut self, query: &Query) -> Result<String, Self::Error>;
 
     /// Engine name of current database.
     fn engine_name(&self) -> &str {
@@ -59,8 +66,12 @@ where
 {
     type Error = <D as DB>::Error;
 
-    async fn run(&mut self, sql: &str) -> Result<String, Self::Error> {
-        <D as DB>::run(self, sql)
+    async fn run_query(&mut self, query: &Query) -> Result<String, Self::Error> {
+        <D as DB>::run_query(self, query)
+    }
+
+    async fn run_statement(&mut self, stmt: &Statement) -> Result<String, Self::Error> {
+        <D as DB>::run_statement(self, stmt)
     }
 
     fn engine_name(&self) -> &str {
@@ -211,16 +222,16 @@ impl<D: AsyncDB> Runner<D> {
     pub async fn run_async(&mut self, record: Record) -> Result<(), TestError> {
         tracing::info!(?record, "testing");
         match record {
-            Record::Statement { conditions, .. } if self.should_skip(&conditions) => {}
-            Record::Statement {
-                error,
-                sql,
-                loc,
-                expected_count,
-                ..
-            } => {
-                let sql = self.replace_keywords(sql);
-                let ret = self.db.run(&sql).await;
+            Record::Statement(statement) => {
+                if self.should_skip(&statement.conditions)  {
+                    return Ok(())
+                }
+
+                // let sql = self.replace_keywords(sql);
+                let ret = self.db.run_statement(&statement).await;
+
+                let Statement { conditions, error, sql, loc, expected_count, .. } = statement;
+
                 match ret {
                     Ok(_) if error => return Err(TestErrorKind::StatementOk { sql }.at(loc)),
                     Ok(count_str) => {
@@ -248,25 +259,29 @@ impl<D: AsyncDB> Runner<D> {
                     hook.on_stmt_complete(&sql).await;
                 }
             }
-            Record::Query { conditions, .. } if self.should_skip(&conditions) => {}
-            Record::Query {
-                loc,
-                sql,
-                expected_results,
-                sort_mode,
-                ..
-            } => {
-                let sql = self.replace_keywords(sql);
-                let output = match self.db.run(&sql).await {
+            Record::Query (query) => {
+                if self.should_skip(&query.conditions) { return Ok(()) }
+
+                // let sql = self.replace_keywords(sql);
+                let output = match self.db.run_query(&query).await {
                     Ok(output) => output,
                     Err(e) => {
                         return Err(TestErrorKind::QueryFail {
-                            sql,
+                            sql: query.sql,
                             err: Arc::new(e),
                         }
-                        .at(loc));
+                        .at(query.loc));
                     }
                 };
+
+                let Query {
+                    loc,
+                    sql,
+                    expected_results,
+                    sort_mode,
+                    ..
+                } = query;
+
                 let mut output = split_lines_and_normalize(&output);
                 let mut expected_results = split_lines_and_normalize(&expected_results);
                 match sort_mode.as_ref().or(self.sort_mode.as_ref()) {
@@ -360,71 +375,71 @@ impl<D: AsyncDB> Runner<D> {
 
     /// aceept the tasks, spawn jobs task to run slt test. the tasks are (AsyncDB, slt filename)
     /// pairs.
-    pub async fn run_parallel_async<Fut>(
-        &mut self,
-        glob: &str,
-        hosts: Vec<String>,
-        conn_builder: fn(String, String) -> Fut,
-        jobs: usize,
-    ) -> Result<(), ParallelTestError>
-    where
-        Fut: Future<Output = D>,
-    {
-        let files = glob::glob(glob).expect("failed to read glob pattern");
-        let mut tasks = vec![];
-        // let conn_builder = Arc::new(conn_builder);
+    // pub async fn run_parallel_async<Fut>(
+    //     &mut self,
+    //     glob: &str,
+    //     hosts: Vec<String>,
+    //     conn_builder: fn(String, String) -> Fut,
+    //     jobs: usize,
+    // ) -> Result<(), ParallelTestError>
+    // where
+    //     Fut: Future<Output = D>,
+    // {
+    //     let files = glob::glob(glob).expect("failed to read glob pattern");
+    //     let mut tasks = vec![];
+    //     // let conn_builder = Arc::new(conn_builder);
 
-        for (idx, file) in files.enumerate() {
-            // for every slt file, we create a database against table conflict
-            let file = file.unwrap();
-            let db_name = file
-                .file_name()
-                .expect("not a valid filename")
-                .to_str()
-                .expect("not a UTF-8 filename");
-            let db_name = db_name
-                .replace(' ', "_")
-                .replace('.', "_")
-                .replace('-', "_");
+    //     for (idx, file) in files.enumerate() {
+    //         // for every slt file, we create a database against table conflict
+    //         let file = file.unwrap();
+    //         let db_name = file
+    //             .file_name()
+    //             .expect("not a valid filename")
+    //             .to_str()
+    //             .expect("not a UTF-8 filename");
+    //         let db_name = db_name
+    //             .replace(' ', "_")
+    //             .replace('.', "_")
+    //             .replace('-', "_");
 
-            self.db
-                .run(&format!("CREATE DATABASE {};", db_name))
-                .await
-                .expect("create db failed");
-            let target = hosts[idx % hosts.len()].clone();
-            tasks.push(async move {
-                let db = conn_builder(target, db_name).await;
-                let mut tester = Runner::new(db);
-                let filename = file.to_string_lossy().to_string();
-                tester.run_file_async(filename).await
-            })
-        }
+    //         self.db
+    //             .run_statement(&format!("CREATE DATABASE {};", db_name))
+    //             .await
+    //             .expect("create db failed");
+    //         let target = hosts[idx % hosts.len()].clone();
+    //         tasks.push(async move {
+    //             let db = conn_builder(target, db_name).await;
+    //             let mut tester = Runner::new(db);
+    //             let filename = file.to_string_lossy().to_string();
+    //             tester.run_file_async(filename).await
+    //         })
+    //     }
 
-        let tasks = stream::iter(tasks).buffer_unordered(jobs);
-        let errors: Vec<_> = tasks
-            .filter_map(|result| async { result.err() })
-            .collect()
-            .await;
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(ParallelTestError { errors })
-        }
-    }
+    //     let tasks = stream::iter(tasks).buffer_unordered(jobs);
+    //     let errors: Vec<_> = tasks
+    //         .filter_map(|result| async { result.err() })
+    //         .collect()
+    //         .await;
+    //     if errors.is_empty() {
+    //         Ok(())
+    //     } else {
+    //         Err(ParallelTestError { errors })
+    //     }
+    // }
 
-    /// sync version of `run_parallel_async`
-    pub fn run_parallel<Fut>(
-        &mut self,
-        glob: &str,
-        hosts: Vec<String>,
-        conn_builder: fn(String, String) -> Fut,
-        jobs: usize,
-    ) -> Result<(), ParallelTestError>
-    where
-        Fut: Future<Output = D>,
-    {
-        block_on(self.run_parallel_async(glob, hosts, conn_builder, jobs))
-    }
+    // /// sync version of `run_parallel_async`
+    // pub fn run_parallel<Fut>(
+    //     &mut self,
+    //     glob: &str,
+    //     hosts: Vec<String>,
+    //     conn_builder: fn(String, String) -> Fut,
+    //     jobs: usize,
+    // ) -> Result<(), ParallelTestError>
+    // where
+    //     Fut: Future<Output = D>,
+    // {
+    //     block_on(self.run_parallel_async(glob, hosts, conn_builder, jobs))
+    // }
 
     /// Replace all keywords in the SQL.
     fn replace_keywords(&self, sql: String) -> String {

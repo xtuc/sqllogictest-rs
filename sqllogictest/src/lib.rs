@@ -41,3 +41,28 @@ pub use self::parser::*;
 pub use self::runner::*;
 
 pub mod harness;
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct Query {
+    loc: Location,
+    conditions: Vec<Condition>,
+    pub type_string: String,
+    sort_mode: Option<SortMode>,
+    label: Option<String>,
+    /// The SQL command.
+    pub sql: String,
+    /// The expected results.
+    expected_results: String,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct Statement {
+    loc: Location,
+    conditions: Vec<Condition>,
+    /// The SQL command is expected to fail instead of to succeed.
+    error: bool,
+    /// The SQL command.
+    pub sql: String,
+    /// Expected rows affected.
+    expected_count: Option<u64>,
+}

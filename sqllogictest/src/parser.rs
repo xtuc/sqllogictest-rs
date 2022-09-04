@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::ParseErrorKind::InvalidIncludeFile;
+use crate::{Query, Statement};
 
 /// The location in source file.
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -69,29 +70,10 @@ pub enum Record {
     Include { loc: Location, filename: String },
     /// A statement is an SQL command that is to be evaluated but from which we do not expect to
     /// get results (other than success or failure).
-    Statement {
-        loc: Location,
-        conditions: Vec<Condition>,
-        /// The SQL command is expected to fail instead of to succeed.
-        error: bool,
-        /// The SQL command.
-        sql: String,
-        /// Expected rows affected.
-        expected_count: Option<u64>,
-    },
+    Statement(Statement),
     /// A query is an SQL command from which we expect to receive results. The result set might be
     /// empty.
-    Query {
-        loc: Location,
-        conditions: Vec<Condition>,
-        type_string: String,
-        sort_mode: Option<SortMode>,
-        label: Option<String>,
-        /// The SQL command.
-        sql: String,
-        /// The expected results.
-        expected_results: String,
-    },
+    Query(Query),
     /// A sleep period.
     Sleep { loc: Location, duration: Duration },
     /// Subtest.
@@ -238,6 +220,9 @@ fn parse_inner(loc: &Location, script: &str) -> Result<Vec<Record>, ParseError> 
         let tokens: Vec<&str> = line.split_whitespace().collect();
         match tokens.as_slice() {
             [] => continue,
+            ["hash-threshold", _value] => {
+                println!("hash-threshold not implemented; ignoring.");
+            }
             ["include", included] => records.push(Record::Include {
                 loc,
                 filename: included.to_string(),
@@ -260,7 +245,7 @@ fn parse_inner(loc: &Location, script: &str) -> Result<Vec<Record>, ParseError> 
                     loc,
                 });
             }
-            ["skipif", engine_name] => {
+            ["skipif", engine_name, _comments @ ..] => {
                 conditions.push(Condition::SkipIf {
                     engine_name: engine_name.to_string(),
                 });
@@ -294,13 +279,13 @@ fn parse_inner(loc: &Location, script: &str) -> Result<Vec<Record>, ParseError> 
                     sql += "\n";
                     sql += line;
                 }
-                records.push(Record::Statement {
+                records.push(Record::Statement(Statement {
                     loc,
                     conditions: std::mem::take(&mut conditions),
                     error,
                     sql,
                     expected_count,
-                });
+                }));
             }
             ["query", type_string, res @ ..] => {
                 let sort_mode = match res.first().map(|&s| SortMode::try_from_str(s)).transpose() {
@@ -337,7 +322,7 @@ fn parse_inner(loc: &Location, script: &str) -> Result<Vec<Record>, ParseError> 
                         expected_results.push('\n');
                     }
                 }
-                records.push(Record::Query {
+                records.push(Record::Query(Query {
                     loc,
                     conditions: std::mem::take(&mut conditions),
                     type_string: type_string.to_string(),
@@ -345,7 +330,7 @@ fn parse_inner(loc: &Location, script: &str) -> Result<Vec<Record>, ParseError> 
                     label,
                     sql,
                     expected_results,
-                });
+                }));
             }
             ["control", res @ ..] => match res {
                 ["sortmode", sort_mode] => match SortMode::try_from_str(sort_mode) {
